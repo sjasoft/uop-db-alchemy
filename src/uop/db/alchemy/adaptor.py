@@ -98,13 +98,15 @@ def columns_from(source, extractor):
 def make_table(base, table_name, columns):
     return Table(table_name, base, *columns)
 
+
 def table_from_schema(schema, name):
     if isinstance(schema, meta.MetaClass):
         return table_from_attrs(schema, Base.metadata, name)
     elif isinstance(schema, BaseModel):
         return table_from_pydantic(schema, Base.metadata, name)
     else:
-        raise Exception(f'Expected MetaClass or MetaModel, got {type(schema)}')
+        raise Exception(f"Expected MetaClass or MetaModel, got {type(schema)}")
+
 
 def table_from_pydantic(model, base, table_name=""):
     if not table_name:
@@ -285,18 +287,18 @@ class AlchemyCollection(db_coll.DBCollection):
 
 
 class AlchemyDatabase(database.Database):
-    def __init__(self, dbname, tenant_id=None, db_brand='sqlite', *schemas, **dbcredentials):
+    def __init__(
+        self, dbname, tenant_id=None, db_brand="sqlite", *schemas, **db_credentials
+    ):
         self._db_name = dbname
         self._db_brand = db_brand
         self._tables = None
         self._root_txn = None
         self._connection = None
-        self._credentials = dbcredentials
-        super().__init__(tenant_id=tenant_id, *schemas, **dbcredentials)
+        super().__init__(tenant_id=tenant_id, *schemas, **db_credentials)
 
     def open_db(self):
->>>>>>> standard_collection
-        self._connection_string = self.get_connection_string(db_brand, dbcredentials)
+        self._connection_string = self.get_connection_string()
         self._engine = create_engine(
             self._connection_string,
             json_serializer=json.dumps,
@@ -304,8 +306,6 @@ class AlchemyDatabase(database.Database):
         )
         self._tables = self.get_tables()
         self._root_txn = None
-        self._connection = None
-        super().__init__(**dbcredentials)
 
     def start_long_transaction(self):
         self._connection = self._engine.connect().__enter__()
@@ -333,27 +333,28 @@ class AlchemyDatabase(database.Database):
         "returns whether database has lov level collection by given name"
         return bool(self.get_existing_table(name))
 
-    def get_connection_string(self, db_brand, dbcredentials):
-        if self._db_brand == 'sqlite':
-            in_memory = dbcredentials.pop('in_memory', False)
+    def get_connection_string(self):
+        if self._db_brand == "sqlite":
+            in_memory = self._credentials.pop("in_memory", False)
             if in_memory:
-                return f'{self._db_brand}://:memory:'
+                return f"{self._db_brand}://:memory:"
             else:
-                return f'{self._db_brand}:///{home_path(self._db_name)}'
+                return f"{self._db_brand}:///{home_path(self._db_name)}"
         else:
-            driver = self._credentials.pop('driver','')
+            driver = self._credentials.pop("driver", "")
             if driver:
-                db_brand = f'{self._db_brand}+{driver}'
-            username = self._credentials.pop('username', '')
-            password = self._credentials.pop('password', '')
-            host = self._credentials.pop('host', 'localhost')
-            port = self._credentials.pop('port', '')
-            host_string = f'{host}:{port}' if port else host
+                db_brand = f"{self._db_brand}+{driver}"
+            username = self._credentials.pop("username", "")
+            password = self._credentials.pop("password", "")
+            host = self._credentials.pop("host", "localhost")
+            port = self._credentials.pop("port", "")
+            host_string = f"{host}:{port}" if port else host
             if username and password:
-                return f'{db_brand}://{username}:{password}@{host_string}/{self._db_name}'
+                return (
+                    f"{db_brand}://{username}:{password}@{host_string}/{self._db_name}"
+                )
             else:
-                raise Exception('username and database required')
-
+                raise Exception("username and database required")
 
     def wrap_raw_collection(self, raw):
         return AlchemyCollection(self, raw)
@@ -366,8 +367,3 @@ class AlchemyDatabase(database.Database):
         metadata = Base.metadata
         metadata.reflect(self._engine)
         return metadata.tables
-
-
-def test_basics():
-    metadata = Base.metadata
-    db = AlchemyDatabase("foobar")
