@@ -337,7 +337,7 @@ class AlchemyDatabase(database.Database):
         if self._db_brand == "sqlite":
             in_memory = self._credentials.pop("in_memory", False)
             if in_memory:
-                return f"{self._db_brand}://:memory:"
+                return f"{self._db_brand}:///:memory:"
             else:
                 return f"{self._db_brand}:///{home_path(self._db_name)}"
         else:
