@@ -1,3 +1,4 @@
+from multiprocessing import connection
 from uop.core import db_collection as db_coll, database
 from uop.core.collections import uop_collection_names
 from pydantic import BaseModel
@@ -22,6 +23,9 @@ from sqlalchemy import (
     delete,
     and_,
     or_,
+    func,
+    literal,
+    text,
 )
 from sqlalchemy.ext.declarative import declarative_base
 from uop.meta.schemas import meta
@@ -29,6 +33,7 @@ from sjasoft.utils.dicts import first_kv
 from sjasoft.utils.env import home_path
 from sqlalchemy.orm import sessionmaker
 import json
+import re
 
 python_sql = dict(
     str=String,
@@ -50,6 +55,8 @@ python_sql = dict(
 
 def column_type(pydantic_type, outer):
     if (outer != pydantic_type) and outer._name == "List":
+        return JSON
+    if (outer != pydantic_type) and outer._name == "Dict":
         return JSON
     if isinstance(pydantic_type, str):
         return python_sql[pydantic_type]
@@ -89,7 +96,7 @@ def extract_class_fields(cls):
 
 def columns_from(source, extractor):
     fields = extractor(source)
-    keys = ["id"] if "id" in fields else list(fields.keys())
+    keys = ["id"] if "id" in fields else [k for k,v in fields.items() if v != JSON]
     return [
         Column(key, type, primary_key=(key in keys)) for key, type in fields.items()
     ]
@@ -102,7 +109,7 @@ def make_table(base, table_name, columns):
 def table_from_schema(schema, name):
     if isinstance(schema, meta.MetaClass):
         return table_from_attrs(schema, Base.metadata, name)
-    elif isinstance(schema, BaseModel):
+    elif issubclass(schema, BaseModel):
         return table_from_pydantic(schema, Base.metadata, name)
     else:
         raise Exception(f"Expected MetaClass or MetaModel, got {type(schema)}")
@@ -130,9 +137,7 @@ class AlchemyCollection(db_coll.DBCollection):
         self._db = db
         self._engine = self._db._engine
         self._table = table
-        super().__init__(
-            self._table, indexed=indexed, tenant_modifier=tenant_modifier, *constraints
-        )
+        super().__init__(self._table, indexed=indexed, *constraints)
 
     def connect(self):
         return self._db._connection or self._engine.connect()
@@ -198,7 +203,8 @@ class AlchemyCollection(db_coll.DBCollection):
         condition = self.modify_criteria(condition)
         stmt = self._table.delete().where(condition)
 
-        return self.execute_sql(stmt, commit=True)
+        res = self.execute_sql(stmt, commit=True)
+        return res
 
     def remove_all(self):
         self.execute_sql(self._table.delete())
@@ -214,7 +220,7 @@ class AlchemyCollection(db_coll.DBCollection):
             "$le": "__le__",
             "$eq": "__eq__",
             "$ne": "__ne__",
-            "$regex": "regexp",
+            "endswith": "endswith"
         }
         if not criteria:
             return []
@@ -229,11 +235,36 @@ class AlchemyCollection(db_coll.DBCollection):
                 return and_(*rest)
             elif key == "$or":
                 return or_(*rest)
+        elif key == "$regex":
+            prop, val = first_kv(criteria[key])
+            column = getattr(self._table.c, prop)
+            if column is not None:
+                # Handle regex based on database brand
+                db_brand = self._db._db_brand
+                if db_brand == "postgresql":
+                    # PostgreSQL uses ~ operator for regex
+                    # Pass value directly - SQLAlchemy will handle quoting
+                    return column.op("REGEXP")(val)
+                elif db_brand in ("mysql", "mariadb"):
+                    # MySQL/MariaDB use REGEXP operator
+                    return column.op("REGEXP")(val)
+                elif db_brand == "sqlite":
+                    # SQLite has limited regex support - use LIKE as fallback
+                    # For simple prefix matching (^pattern), use startswith for reliability
+                    if val.endswith("$"):
+                        val = val[:-1]
+                        if val.startswith("\\."):
+                            val = val[2:]
+                    return column.endswith(val)
+                else:
+                    # Default: try to use database's regex function
+                    return func.regexp(column, val)
         elif key in to_method.keys():
             prop, val = first_kv(criteria[key])
             column = getattr(self._table.c, prop)
             if column is not None:
-                fn = getattr(column, to_method[key])
+                method_name = to_method[key]
+                fn = getattr(column, method_name)
                 return fn(val)
         else:
             column = getattr(self._table.c, key)
@@ -286,9 +317,37 @@ class AlchemyCollection(db_coll.DBCollection):
         return dict(rows[0]._mapping) if rows else None
 
 
+class AlchemyMasterDB:
+    def __init__(self, db_brand, dbname, username, password, port, host="localhost"):
+        connection_string = f'{db_brand}://{username}:{password}@{host}:{port}/{dbname}'
+        self._engine = create_engine(connection_string)
+
+    def drop_database_named(self, db_name):
+        if self.database_exists(db_name):
+            with self._engine.connect() as conn:
+                conn.execution_options(isolation_level="AUTOCOMMIT")
+                conn.execute(text(f"DROP DATABASE IF EXISTS {db_name}"))
+
+    def get_database_names(self):
+        with self._engine.connect() as conn:
+            result = conn.execute(text("SELECT datname FROM pg_database WHERE datistemplate = false"))
+            return [row[0] for row in result]
+        
+    def database_exists(self, db_name):
+        db_names = self.get_database_names()
+        return db_name in db_names
+
+    def ensure_database_named(self, db_name):
+        if not self.database_exists(db_name):   
+            with self._engine.connect() as conn:    
+                conn.execution_options(isolation_level="AUTOCOMMIT")
+                conn.execute(text(f"CREATE DATABASE {db_name}"))    
+            
+    
 class AlchemyDatabase(database.Database):
+    
     def __init__(
-        self, dbname, tenant_id=None, db_brand="sqlite", *schemas, **db_credentials
+        self, dbname, *schemas, db_brand="sqlite", tenant_id=None, **db_credentials
     ):
         self._db_name = dbname
         self._db_brand = db_brand
@@ -306,6 +365,7 @@ class AlchemyDatabase(database.Database):
         )
         self._tables = self.get_tables()
         self._root_txn = None
+        super().open_db()
 
     def start_long_transaction(self):
         self._connection = self._engine.connect().__enter__()
@@ -350,9 +410,7 @@ class AlchemyDatabase(database.Database):
             port = self._credentials.pop("port", "")
             host_string = f"{host}:{port}" if port else host
             if username and password:
-                return (
-                    f"{db_brand}://{username}:{password}@{host_string}/{self._db_name}"
-                )
+                return f"{self._db_brand}://{username}:{password}@{host_string}/{self._db_name}"
             else:
                 raise Exception("username and database required")
 
@@ -361,7 +419,10 @@ class AlchemyDatabase(database.Database):
 
     def get_raw_collection(self, name, schema):
         existing = self.get_existing_table(name)
-        return existing or table_from_schema(schema, name)
+        if existing is None:
+            existing = table_from_schema(schema, name)
+            Base.metadata.create_all(self._engine)
+        return existing
 
     def get_tables(self):
         metadata = Base.metadata
