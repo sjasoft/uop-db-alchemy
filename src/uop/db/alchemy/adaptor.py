@@ -130,31 +130,12 @@ def table_from_attrs(cls, base, table_name):
 def create_index(table, columns):
     pass
 
-
-class AlchemyCollection(db_coll.DBCollection):
-    def __init__(self, db, table, indexed=False, *constraints):
-        # TODO consider preprocessed statements
+class TableUtils:
+    def __init__(self, table, db):
         self._db = db
         self._engine = self._db._engine
         self._table = table
-        super().__init__(self._table, indexed=indexed, *constraints)
-
-    def connect(self):
-        return self._db._connection or self._engine.connect()
-
-    def column_class_check(self, column_name, cls_id):
-        return {"$like": {column_name: f"%{cls_id}"}}
-
-    def add_index(self, index_name, field_names):
-        columns = [self._table.getattr(s) for s in field_names]
-        Index(
-            None,
-            _table=self._table,
-        )
-
-    def in_long_transaction(self):
-        return self._db._connection is not None
-
+        
     def column_is_json(self, name):
         column = getattr(self._table.c, name)
         return isinstance(column.type, JSON)
@@ -175,42 +156,9 @@ class AlchemyCollection(db_coll.DBCollection):
 
         return {k: maybe_json_stringify(k, v) for k, v in fields.items()}
 
-    def insert(self, **fields):
-        stmt = self._table.insert().values(**fields)
-        return self.execute_sql(stmt, commit=True)
-
-    def replace_one(self, an_id, data):
-        return self.update({"id": an_id}, data)
-
-    def count(self, criteria):
-        stmt = self._table.select().where(self.modify_criteria(criteria))
-        rows = [r for r in self.execute_sql(stmt)]
-        return len(rows)
-
-    def update(self, selector, mods, partial=True):
-        selector = selector or {}
-        selector = self.modify_criteria(selector)
-        stmt = self._table.update().where(selector).values(**mods)
-        return self.execute_sql(stmt, commit=True)
-
-    def update_one(self, key, mods):
-        return self.update({"id": key}, mods)
-
-    def remove(self, dict_or_key):
-        condition = (
-            dict_or_key if isinstance(dict_or_key, dict) else {"id": dict_or_key}
-        )
-        condition = self.modify_criteria(condition)
-        stmt = self._table.delete().where(condition)
-
-        res = self.execute_sql(stmt, commit=True)
-        return res
-
-    def remove_all(self):
-        self.execute_sql(self._table.delete())
-
-    def get_column(self, name):
-        return getattr(self._table.c, name)
+    def insert_stmt(self, **fields):
+        fields = self.stringify_json(fields)
+        return self._table.insert().values(**fields)
 
     def modify_criteria(self, criteria):
         to_method = {
@@ -272,6 +220,18 @@ class AlchemyCollection(db_coll.DBCollection):
                 return column == criteria[key]
         raise Exception(f"cannot parse criteria: {criteria}")
 
+    def update_stmt(self, selector, mods):
+        selector = selector or {}
+        selector = self.modify_criteria(selector)
+        return self._table.update().where(selector).values(**mods)
+        
+    def delete_stmt(self, dict_or_key):
+        condition = (
+            dict_or_key if isinstance(dict_or_key, dict) else {"id": dict_or_key}
+        )
+        condition = self.modify_criteria(condition)
+        return self._table.delete().where(condition)
+
     def execute_sql(self, stmt, commit=False):
         if self.in_long_transaction():
             return self._db._connection.execute(stmt)
@@ -287,19 +247,20 @@ class AlchemyCollection(db_coll.DBCollection):
                     c.rollback()
                     raise e
 
-    def find(
-        self, criteria=None, only_cols=None, order_by=None, limit=None, ids_only=False
-    ):
-        mod_criteria = self.modify_criteria(criteria)
-        if ids_only:
-            only_cols = ["id"]
-        only_cols = only_cols or []
+    def in_long_transaction(self):
+        return self._db._connection is not None
+
+    def select_stmt(self, criteria=None, only_cols=None, order_by=None, limit=None):
         stmt = self._table.select()
         if criteria:
-            stmt = stmt.where(mod_criteria)
+            stmt = stmt.where(self.modify_criteria(criteria))
         if order_by:
             stmt = stmt.order_by(*order_by)
-        rows = [r for r in self.execute_sql(stmt)]
+        if limit:
+            stmt = stmt.limit(limit)
+        return stmt
+    
+    def process_rows(self, rows, only_cols=None, ids_only=False):
         if ids_only:
             return [row[0] for row in rows]
         else:
@@ -311,10 +272,70 @@ class AlchemyCollection(db_coll.DBCollection):
                     res = [{k: v for k, v in row.items()} for row in res]
             return res
 
+    def get_column(self, name):
+        return getattr(self._table.c, name)
+
+class AlchemyCollection(db_coll.DBCollection, TableUtils):
+    def __init__(self, db, table, indexed=False, *constraints):
+        # TODO consider preprocessed statements
+        TableUtils.__init__(self, table, db)
+        super().__init__(self._table, indexed=indexed, *constraints)
+
+    def connect(self):
+        return self._db._connection or self._engine.connect()
+
+    def column_class_check(self, column_name, cls_id):
+        return {"$like": {column_name: f"%{cls_id}"}}
+
+    def add_index(self, index_name, field_names):
+        columns = [self._table.getattr(s) for s in field_names]
+        Index(
+            None,
+            _table=self._table,
+        )
+
+
+    def insert(self, **fields):
+        return self.execute_sql(self.insert_stmt(**fields), commit=True)
+
+    def replace_one(self, an_id, data):
+        return self.update({"id": an_id}, data)
+
+    def count(self, criteria):
+        stmt = self._table.select().where(self.modify_criteria(criteria))
+        rows = [r for r in self.execute_sql(stmt)]
+        return len(rows)
+
+
+    def update(self, selector, mods, partial=True):
+        stmt = self.update_stmt(selector, mods)
+        return self.execute_sql(stmt, commit=True)
+
+    def update_one(self, key, mods):
+        return self.update({"id": key}, mods)
+
+    
+    def remove(self, dict_or_key):
+        stmt = self.delete_stmt(dict_or_key)
+        return self.execute_sql(stmt, commit=True)
+
+    def remove_all(self):
+        self.execute_sql(self._table.delete())
+
+
+
+        
+    def find(
+        self, criteria=None, only_cols=None, order_by=None, limit=None, ids_only=False
+    ):
+        stmt = self.select_stmt(criteria, only_cols, order_by, limit)
+        rows = [r for r in self.execute_sql(stmt)]
+        return self.process_rows(rows, only_cols, ids_only)
+
     def get(self, an_id):
         stmt = self._table.select().where(self._table.c.id == an_id)
         rows = [r for r in self.execute_sql(stmt)]
-        return dict(rows[0]._mapping) if rows else None
+        return rows[0] if rows else None
 
 
 class AlchemyMasterDB:
