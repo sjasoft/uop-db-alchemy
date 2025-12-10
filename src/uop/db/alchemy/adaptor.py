@@ -157,7 +157,7 @@ class TableUtils:
         return {k: maybe_json_stringify(k, v) for k, v in fields.items()}
 
     def insert_stmt(self, **fields):
-        fields = self.stringify_json(fields)
+        #fields = self.stringify_json(fields)
         return self._table.insert().values(**fields)
 
     def modify_criteria(self, criteria):
@@ -335,7 +335,7 @@ class AlchemyCollection(db_coll.DBCollection, TableUtils):
     def get(self, an_id):
         stmt = self._table.select().where(self._table.c.id == an_id)
         rows = [r for r in self.execute_sql(stmt)]
-        return rows[0] if rows else None
+        return dict(rows[0]._mapping) if rows else None
 
 
 class AlchemyMasterDB:
