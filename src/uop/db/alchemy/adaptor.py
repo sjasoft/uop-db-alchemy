@@ -32,6 +32,7 @@ from uop.meta.schemas import meta
 from sjasoft.utils.dicts import first_kv
 from sjasoft.utils.env import home_path
 from sqlalchemy.orm import sessionmaker
+import inspect
 import json
 import re
 
@@ -96,7 +97,7 @@ def extract_class_fields(cls):
 
 def columns_from(source, extractor):
     fields = extractor(source)
-    keys = ["id"] if "id" in fields else [k for k,v in fields.items() if v != JSON]
+    keys = ["id"] if "id" in fields else [k for k, v in fields.items() if v != JSON]
     return [
         Column(key, type, primary_key=(key in keys)) for key, type in fields.items()
     ]
@@ -107,9 +108,11 @@ def make_table(base, table_name, columns):
 
 
 def table_from_schema(schema, name):
+    if isinstance(schema, dict):
+        schema = meta.MetaClass(**schema)    
     if isinstance(schema, meta.MetaClass):
         return table_from_attrs(schema, Base.metadata, name)
-    elif issubclass(schema, BaseModel):
+    elif inspect.isclass(schema) and issubclass(schema, BaseModel):
         return table_from_pydantic(schema, Base.metadata, name)
     else:
         raise Exception(f"Expected MetaClass or MetaModel, got {type(schema)}")
@@ -130,12 +133,13 @@ def table_from_attrs(cls, base, table_name):
 def create_index(table, columns):
     pass
 
+
 class TableUtils:
     def __init__(self, table, db):
         self._db = db
         self._engine = self._db._engine
         self._table = table
-        
+
     def column_is_json(self, name):
         column = getattr(self._table.c, name)
         return isinstance(column.type, JSON)
@@ -157,7 +161,7 @@ class TableUtils:
         return {k: maybe_json_stringify(k, v) for k, v in fields.items()}
 
     def insert_stmt(self, **fields):
-        #fields = self.stringify_json(fields)
+        # fields = self.stringify_json(fields)
         return self._table.insert().values(**fields)
 
     def modify_criteria(self, criteria):
@@ -168,7 +172,7 @@ class TableUtils:
             "$le": "__le__",
             "$eq": "__eq__",
             "$ne": "__ne__",
-            "endswith": "endswith"
+            "endswith": "endswith",
         }
         if not criteria:
             return []
@@ -224,7 +228,7 @@ class TableUtils:
         selector = selector or {}
         selector = self.modify_criteria(selector)
         return self._table.update().where(selector).values(**mods)
-        
+
     def delete_stmt(self, dict_or_key):
         condition = (
             dict_or_key if isinstance(dict_or_key, dict) else {"id": dict_or_key}
@@ -259,7 +263,7 @@ class TableUtils:
         if limit:
             stmt = stmt.limit(limit)
         return stmt
-    
+
     def process_rows(self, rows, only_cols=None, ids_only=False):
         if ids_only:
             return [row[0] for row in rows]
@@ -274,6 +278,7 @@ class TableUtils:
 
     def get_column(self, name):
         return getattr(self._table.c, name)
+
 
 class AlchemyCollection(db_coll.DBCollection, TableUtils):
     def __init__(self, db, table, indexed=False, *constraints):
@@ -294,7 +299,6 @@ class AlchemyCollection(db_coll.DBCollection, TableUtils):
             _table=self._table,
         )
 
-
     def insert(self, **fields):
         return self.execute_sql(self.insert_stmt(**fields), commit=True)
 
@@ -306,7 +310,6 @@ class AlchemyCollection(db_coll.DBCollection, TableUtils):
         rows = [r for r in self.execute_sql(stmt)]
         return len(rows)
 
-
     def update(self, selector, mods, partial=True):
         stmt = self.update_stmt(selector, mods)
         return self.execute_sql(stmt, commit=True)
@@ -314,7 +317,6 @@ class AlchemyCollection(db_coll.DBCollection, TableUtils):
     def update_one(self, key, mods):
         return self.update({"id": key}, mods)
 
-    
     def remove(self, dict_or_key):
         stmt = self.delete_stmt(dict_or_key)
         return self.execute_sql(stmt, commit=True)
@@ -322,9 +324,6 @@ class AlchemyCollection(db_coll.DBCollection, TableUtils):
     def remove_all(self):
         self.execute_sql(self._table.delete())
 
-
-
-        
     def find(
         self, criteria=None, only_cols=None, order_by=None, limit=None, ids_only=False
     ):
@@ -340,7 +339,7 @@ class AlchemyCollection(db_coll.DBCollection, TableUtils):
 
 class AlchemyMasterDB:
     def __init__(self, db_brand, dbname, username, password, port, host="localhost"):
-        connection_string = f'{db_brand}://{username}:{password}@{host}:{port}/{dbname}'
+        connection_string = f"{db_brand}://{username}:{password}@{host}:{port}/{dbname}"
         self._engine = create_engine(connection_string)
 
     def drop_database_named(self, db_name):
@@ -351,24 +350,25 @@ class AlchemyMasterDB:
 
     def get_database_names(self):
         with self._engine.connect() as conn:
-            result = conn.execute(text("SELECT datname FROM pg_database WHERE datistemplate = false"))
+            result = conn.execute(
+                text("SELECT datname FROM pg_database WHERE datistemplate = false")
+            )
             return [row[0] for row in result]
-        
+
     def database_exists(self, db_name):
         db_names = self.get_database_names()
         return db_name in db_names
 
     def ensure_database_named(self, db_name):
-        if not self.database_exists(db_name):   
-            with self._engine.connect() as conn:    
+        if not self.database_exists(db_name):
+            with self._engine.connect() as conn:
                 conn.execution_options(isolation_level="AUTOCOMMIT")
-                conn.execute(text(f"CREATE DATABASE {db_name}"))    
-            
-    
+                conn.execute(text(f"CREATE DATABASE {db_name}"))
+
+
 class AlchemyDatabase(database.Database):
-    
     def __init__(
-        self, dbname, *schemas, db_brand="sqlite", tenant_id=None, **db_credentials
+        self, dbname, *schemas, db_brand="sqlite", tenant_id='', **db_credentials
     ):
         self._db_name = dbname
         self._db_brand = db_brand
@@ -393,14 +393,16 @@ class AlchemyDatabase(database.Database):
         self._root_txn = self._connection.begin().__enter__()
 
     def end_long_transaction(self):
-        self._root_txn.__exit__(None, None, None)
-        self._connection.__exit__(None, None, None)
+        if self._root_txn:
+            self._root_txn.__aexit__(None, None, None)
+            self._connection.__aexit__(None, None, None)
         self._connection = None
         self._root_txn = None
         super().end_long_transaction()
 
     def really_commit(self):
         self._root_txn.commit()
+        self._root_txn = None
 
     def abort(self):
         if self._root_txn:
@@ -408,7 +410,7 @@ class AlchemyDatabase(database.Database):
         self.end_long_transaction()
 
     def get_existing_table(self, table_name):
-        return self.get_tables().get(table_name)
+        return self._tables.get(table_name)
 
     def _has_collection(self, name):
         "returns whether database has lov level collection by given name"
@@ -422,16 +424,19 @@ class AlchemyDatabase(database.Database):
             else:
                 return f"{self._db_brand}:///{home_path(self._db_name)}"
         else:
+            db_brand = self._db_brand
             driver = self._credentials.pop("driver", "")
             if driver:
-                db_brand = f"{self._db_brand}+{driver}"
+                db_brand = f"{db_brand}+{driver}"
             username = self._credentials.pop("username", "")
             password = self._credentials.pop("password", "")
             host = self._credentials.pop("host", "localhost")
             port = self._credentials.pop("port", "")
             host_string = f"{host}:{port}" if port else host
             if username and password:
-                return f"{self._db_brand}://{username}:{password}@{host_string}/{self._db_name}"
+                return (
+                    f"{db_brand}://{username}:{password}@{host_string}/{self._db_name}"
+                )
             else:
                 raise Exception("username and database required")
 
