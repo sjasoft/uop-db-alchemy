@@ -27,7 +27,7 @@ from sqlalchemy import (
     literal,
     text,
 )
-from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import declarative_base
 from uop.meta.schemas import meta
 from sjasoft.utils.dicts import first_kv
 from sjasoft.utils.env import home_path
@@ -109,7 +109,7 @@ def make_table(base, table_name, columns):
 
 def table_from_schema(schema, name):
     if isinstance(schema, dict):
-        schema = meta.MetaClass(**schema)    
+        schema = meta.MetaClass(**schema)
     if isinstance(schema, meta.MetaClass):
         return table_from_attrs(schema, Base.metadata, name)
     elif inspect.isclass(schema) and issubclass(schema, BaseModel):
@@ -368,7 +368,7 @@ class AlchemyMasterDB:
 
 class AlchemyDatabase(database.Database):
     def __init__(
-        self, dbname, *schemas, db_brand="sqlite", tenant_id='', **db_credentials
+        self, dbname, *schemas, db_brand="sqlite", tenant_id="", **db_credentials
     ):
         self._db_name = dbname
         self._db_brand = db_brand

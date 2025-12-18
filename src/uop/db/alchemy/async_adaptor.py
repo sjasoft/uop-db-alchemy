@@ -9,7 +9,7 @@ import json
 class A_AlchemyCollection(base.DBCollection, adaptor.TableUtils):
     def __init__(self, db, table, indexed=False, *constraints):
         adaptor.TableUtils.__init__(self, table, db)
-        base.DBCollection.__init__(self, db, table, indexed, *constraints)
+        base.DBCollection.__init__(self, table, indexed, *constraints)
 
     async def execute_sql(self, stmt, commit=False):
         if self.in_long_transaction():
