@@ -1,8 +1,8 @@
 from uop.db.alchemy import adaptor
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
-from uop.core.async_path import db_collection as base
-from uop.core.async_path import database
+from uop.core import async_db_collection as base
+from uop.core import async_database
 import json
 
 
@@ -58,7 +58,7 @@ class A_AlchemyCollection(base.DBCollection, adaptor.TableUtils):
         return dict(rows[0]._mapping) if rows else None
 
 
-class A_AlchemyDatabase(database.Database, adaptor.AlchemyDatabase):
+class A_AlchemyDatabase(async_database.Database, adaptor.AlchemyDatabase):
     async def open_db(self):
         self._connection_string = self.get_connection_string()
         self._engine = create_async_engine(
@@ -79,26 +79,28 @@ class A_AlchemyDatabase(database.Database, adaptor.AlchemyDatabase):
     async def start_long_transaction(self):
         self._connection = await self._engine.connect().__aenter__()
         self._root_txn = await self._connection.begin().__aenter__()
+        await super().start_long_transaction()
 
     async def end_long_transaction(self):
         if self._root_txn:
             await self._root_txn.__aexit__(None, None, None)
-            await self._connection.__aexit__(None, None, None)
+            self._connection = None
         self._connection = None
         self._root_txn = None
         await super().end_long_transaction()
 
-    async def really_commit(self):
-        await self._root_txn.commit()
-        # self._root_txn = None
 
     def get_existing_table(self, table_name):
         return self._tables.get(table_name)
 
-    async def abort(self):
+    async def db_abort(self):
         if self._root_txn:
             await self._root_txn.rollback()
-        await self.end_long_transaction()
+
+
+    async def db_commit(self):
+        if self._root_txn:
+            await self._root_txn.commit()
 
     def wrap_raw_collection(self, raw):
         return A_AlchemyCollection(self, raw)

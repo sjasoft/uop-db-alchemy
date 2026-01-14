@@ -391,23 +391,24 @@ class AlchemyDatabase(database.Database):
     def start_long_transaction(self):
         self._connection = self._engine.connect().__enter__()
         self._root_txn = self._connection.begin().__enter__()
+        super().start_long_transaction()
 
     def end_long_transaction(self):
         if self._root_txn:
-            self._root_txn.__aexit__(None, None, None)
-            self._connection.__aexit__(None, None, None)
+            self._root_txn.__exit__(None, None, None)
+            self._connection = None
         self._connection = None
         self._root_txn = None
         super().end_long_transaction()
 
-    def really_commit(self):
-        self._root_txn.commit()
-        self._root_txn = None
 
-    def abort(self):
+    def db_abort(self):
         if self._root_txn:
             self._root_txn.rollback()
-        self.end_long_transaction()
+
+    def db_commit(self):
+        if self._root_txn:
+            self._root_txn.commit()
 
     def get_existing_table(self, table_name):
         return self._tables.get(table_name)
